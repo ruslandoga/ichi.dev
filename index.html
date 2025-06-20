@@ -11,8 +11,18 @@
     <link href="./app.css" rel="stylesheet" />
   </head>
   <body>
-    <div class="flex items-center justify-center h-screen">
-      <p class="text-lg">ichi is now</p>
+    <div class="relative flex flex-col items-center justify-center h-screen">
+      <p class="text-lg animate-bounce">
+        <em class="px-0.5 text-cyan-600 bg-slate-800">ichi</em>
+        will make
+        <em class="px-0.5 text-pink-300 bg-pink-900">easy</em>
+      </p>
+      <div class="mt-14 animate-bounce">\--/</div>
+      <div class="animate-bounce absolute h-72 w-72">
+        <div
+          class="h-full w-full border-2 border-white border-dashed rounded-full animate-[spin_5s_linear_infinite]"
+        ></div>
+      </div>
     </div>
   </body>
 </html>
