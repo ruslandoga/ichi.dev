@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>DuckDB Wasm Interactive Dashboard</title>
+    <meta charset="utf-8" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦆</text></svg>"
+    />
+    <!-- CodeMirror CSS -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.15/codemirror.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.15/theme/material-darker.min.css"
+    />
+
+    <style type="text/css">
+      body {
+        background-color: black;
+        color: #ddd;
+        font-family: monospace;
+        margin: 0;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+        box-sizing: border-box;
+      }
+      ::selection {
+        background: #4b2858;
+      }
+      h1,
+      h2 {
+        color: #00ff00; /* Greenish for headings */
+        margin-top: 0;
+      }
+      .container {
+        display: flex;
+        flex-wrap: wrap; /* Allow wrapping on smaller screens */
+        gap: 20px;
+        flex-grow: 1;
+      }
+      .query-panel,
+      .output-panel {
+        background-color: #111; /* Slightly lighter than body */
+        border: 1px solid #333;
+        padding: 15px;
+        border-radius: 5px;
+        display: flex;
+        flex-direction: column; /* Ensure children stack vertically */
+      }
+      .query-panel {
+        flex: 1; /* Takes up 1 part of space */
+        min-width: 350px; /* Minimum width before wrapping */
+      }
+      .output-panel {
+        flex: 2; /* Takes up 2 parts of space */
+        min-width: 400px;
+      }
+      /* CodeMirror styling */
+      .CodeMirror {
+        border: 1px solid #333;
+        height: auto; /* Default height, can be made taller */
+        min-height: 150px;
+        flex-grow: 1; /* Allow editor to take available space in query-panel */
+        font-size: 0.9em;
+      }
+      #runQueryButton {
+        background-color: #008000; /* Green */
+        color: white;
+        padding: 10px 15px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-family: monospace;
+        font-size: 1em;
+        margin-top: 10px;
+      }
+      #runQueryButton:hover {
+        background-color: #006400; /* Darker green */
+      }
+      #runQueryButton:disabled {
+        background-color: #555;
+        cursor: not-allowed;
+      }
+      #progressOutput {
+        color: #00ff00; /* Green for progress */
+        white-space: pre-wrap;
+        margin-bottom: 15px;
+        min-height: 40px; /* Space for messages */
+        background-color: #0a0a0a;
+        padding: 10px;
+        border-radius: 3px;
+      }
+      #tableResultOutput table {
+        border-collapse: collapse;
+        width: 100%; /* Make table take full width of its container */
+        font-size: 0.9em;
+        margin-top: 10px;
+      }
+      #tableResultOutput th,
+      #tableResultOutput td {
+        border: 1px solid #444; /* CLI-like borders */
+        padding: 6px 8px;
+        text-align: left;
+        white-space: nowrap; /* Prevent line breaks in cells for ASCII feel */
+      }
+      #tableResultOutput th {
+        background-color: #2a2a2a; /* Darker header */
+        color: #00ff00; /* Header text color */
+        border-bottom: 2px solid #555;
+      }
+      #tableResultOutput td {
+        color: #ddd;
+      }
+      #tableResultOutput {
+        flex-grow: 1;
+        overflow: auto; /* Allow scrolling for large tables */
+      }
+    </style>
+  </head>
+  <body>
+    <h1>DuckDB Wasm Interactive Dashboard</h1>
+    <div class="container">
+      <div class="query-panel">
+        <h2>SQL Query:</h2>
+        <textarea id="sqlEditor"></textarea>
+        <button id="runQueryButton">Run Query</button>
+      </div>
+      <div class="output-panel">
+        <h2>Progress:</h2>
+        <div id="progressOutput">Enter a query and click "Run Query".</div>
+        <h2>Result:</h2>
+        <div id="tableResultOutput">
+          <!-- Table will be injected here -->
+        </div>
+      </div>
+    </div>
+
+    <!-- CodeMirror JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.15/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.15/mode/sql/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.15/addon/edit/matchbrackets.min.js"></script>
+
+    <script type="module">
+      import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.1-dev132.0/+esm";
+
+      const initialSQLQuery = `select language, to_seconds(sum(duration))::text as 'time spent'
+from (
+  select
+    language,
+    lag(time) over (order by time) as prev_time,
+    epoch(time) - epoch(prev_time) as raw_duration,
+    raw_duration * (raw_duration <= 360)::int as duration
+  from 'https://stats.r2.edify.space/test.parquet'
+)
+group by language
+having language is not null and language != '<<LAST_LANGUAGE>>'
+order by sum(duration) desc
+limit 15;`;
+
+      let editor;
+      let dbInstance = null; // To hold the DuckDB instance globally within the module
+      let isQueryRunning = false; // Flag to prevent multiple simultaneous queries
+
+      const progressOutput = document.getElementById("progressOutput");
+      const tableResultOutput = document.getElementById("tableResultOutput");
+      const runQueryButton = document.getElementById("runQueryButton");
+
+      function initializeEditor() {
+        editor = CodeMirror.fromTextArea(document.getElementById("sqlEditor"), {
+          mode: "text/x-sql",
+          theme: "material-darker", // Using a dark theme
+          lineNumbers: true,
+          matchBrackets: true,
+          indentWithTabs: true,
+          smartIndent: true,
+          lineWrapping: true,
+        });
+        editor.setValue(initialSQLQuery.trim());
+        // Adjust editor size dynamically
+        setTimeout(() => editor.refresh(), 100); // Refresh to ensure proper rendering
+      }
+
+      async function initializeDuckDB() {
+        if (dbInstance) return dbInstance; // Already initialized
+
+        progressOutput.style.color = "#00ff00";
+        progressOutput.textContent = "Initializing DuckDB (one-time setup)...";
+        runQueryButton.disabled = true;
+
+        const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+        const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+        const scriptURL = URL.createObjectURL(
+          new Blob([`importScripts("${bundle.mainWorker}");`], {
+            type: "text/javascript",
+          })
+        );
+        const worker = new Worker(scriptURL);
+        const logger = new duckdb.ConsoleLogger(); // For more detailed logs in browser console
+        const db = new duckdb.AsyncDuckDB(logger, worker);
+
+        await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+        URL.revokeObjectURL(scriptURL);
+        dbInstance = db;
+        progressOutput.textContent =
+          "DuckDB initialized. Ready to run queries.";
+        runQueryButton.disabled = false;
+        return dbInstance;
+      }
+
+      async function executeQuery() {
+        if (isQueryRunning) {
+          progressOutput.textContent =
+            "A query is already in progress. Please wait.";
+          return;
+        }
+        isQueryRunning = true;
+        runQueryButton.disabled = true;
+        tableResultOutput.innerHTML = ""; // Clear previous results
+
+        try {
+          const currentDB = await initializeDuckDB(); // Ensure DB is initialized
+          if (!currentDB) {
+            progressOutput.textContent = "DuckDB could not be initialized.";
+            throw new Error("DB not initialized");
+          }
+
+          const sqlQueryToRun = editor.getValue();
+          progressOutput.style.color = "#00ff00";
+          progressOutput.textContent = "Connecting to database...";
+          const c = await currentDB.connect();
+
+          progressOutput.textContent =
+            "Running query (this might take a moment for remote Parquet)...";
+          const arrowTable = await c.query(sqlQueryToRun);
+
+          progressOutput.textContent = "Query finished. Rendering results...";
+
+          console.log(arrowTable.toArray());
+
+          const data = arrowTable.toArray().map((row) => {
+            const newRow = {};
+            for (const key in row) {
+              console.log(key, typeof row[key], row[key]);
+
+              newRow[key] =
+                typeof row[key] === "bigint" ? row[key].toString() : row[key];
+            }
+            return newRow;
+          });
+
+          if (data.length === 0) {
+            tableResultOutput.textContent = "Query returned no results.";
+            progressOutput.textContent = "Done.";
+          } else {
+            let htmlTable = "<table><thead><tr>";
+            const headers = Object.keys(data[0]);
+            headers.forEach((header) => (htmlTable += `<th>${header}</th>`));
+            htmlTable += "</tr></thead><tbody>";
+
+            data.forEach((row) => {
+              htmlTable += "<tr>";
+              headers.forEach((header) => {
+                const value =
+                  row[header] === null || row[header] === undefined
+                    ? ""
+                    : String(row[header]);
+                htmlTable += `<td>${value}</td>`;
+              });
+              htmlTable += "</tr>";
+            });
+
+            htmlTable += "</tbody></table>";
+            tableResultOutput.innerHTML = htmlTable;
+            progressOutput.textContent = `Done. Displaying ${data.length} rows.`;
+          }
+          await c.close();
+        } catch (e) {
+          console.error(e);
+          progressOutput.style.color = "red";
+          progressOutput.textContent = `Error: ${e.message}\n\nSee browser console for more details.`;
+          tableResultOutput.innerHTML = `<p style="color:red;">Failed to display results due to error.</p>`;
+        } finally {
+          isQueryRunning = false;
+          runQueryButton.disabled = false;
+          // Do not terminate dbInstance here if you want to reuse it
+        }
+      }
+
+      // Initialize CodeMirror when the script loads
+      initializeEditor();
+
+      // Attach event listener to the button
+      runQueryButton.addEventListener("click", executeQuery);
+
+      // Optionally, run DuckDB initialization on page load so it's ready faster for the first query
+      // Or let it initialize on the first click of "Run Query" (as implemented above)
+      // To initialize on load:
+      // initializeDuckDB().catch(err => {
+      //   console.error("Failed to initialize DuckDB on load:", err);
+      //   progressOutput.style.color = "red";
+      //   progressOutput.textContent = "Failed to initialize DuckDB. Check console.";
+      // });
+    </script>
+  </body>
+</html>
